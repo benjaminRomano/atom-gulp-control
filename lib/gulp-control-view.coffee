@@ -1,6 +1,7 @@
 crypto = require 'crypto'
 fs = require 'fs'
 path = require 'path'
+os = require 'os'
 
 {BufferedProcess} = require 'atom'
 {View} = require 'atom-space-pen-views'
@@ -12,7 +13,13 @@ module.exports =
 class GulpControlView extends View
   @content: ->
     @div class: 'gulp-control', =>
-      @ul class: 'tasks', outlet: 'taskList'
+      @div class: 'sidebar', =>
+        @div class: 'sidebarSection', =>
+          @h6 "Gulpfiles:"
+          @ul class: 'gulpfiles', outlet: 'gulpfilesList'
+        @div class: 'sidebarSection', =>
+          @h6 "Tasks:"
+          @ul class: 'tasks', outlet: 'taskList'
       @div class: 'output', outlet: 'outputPane'
 
   serialize: ->
@@ -25,12 +32,47 @@ class GulpControlView extends View
       @writeOutput 'No project path found, aborting', 'error'
       return
 
-    @click '.tasks li.task', (event) =>
+    @click '.gulpfiles li.item', (event) =>
+      targetFilePath = event.target.textContent
+      for gulpfile in @gulpfiles
+        filePath = @createFilePath(gulpfile.dir, gulpfile.fileName)
+        if filePath == targetFilePath
+          @find(".gulpfiles .item").removeClass("active unning")
+          @find(event.target).addClass("active running")
+          @gulpFilePath = targetFilePath
+          @getGulpTasks()
+
+
+    @click '.tasks li.item', (event) =>
       task = event.target.textContent
       for t in @tasks when t is task
         return @runGulp(task)
 
+    @initializeGulpFileList()
+
     @getGulpTasks()
+
+    return
+
+  initializeGulpFileList: ->
+    projPath = atom.project.getPaths()[0]
+    @gulpfiles = @getGulpfiles(projPath)
+
+    if not @gulpfiles or not @gulpfiles.length
+      @writeOutput "Unable to find any gulpfiles
+        in #{projPath}/**/gulpfile.[js|coffee]", 'error'
+      return
+
+    @gulpFilePath = @createFilePath(@gulpfiles[0].dir, @gulpfiles[0].fileName)
+
+    for gulpfile in @gulpfiles
+      filePath = @createFilePath(gulpfile.dir, gulpfile.fileName)
+
+      if @gulpFilePath == filePath
+        @gulpfilesList.append "<li class='active running item'>#{filePath}</li>"
+      else
+        @gulpfilesList.append "<li class='item'>#{filePath}</li>"
+
     return
 
   destroy: ->
@@ -45,14 +87,25 @@ class GulpControlView extends View
   getTitle: ->
     return 'gulp.js:control'
 
-  getGulpCwd: (cwd) ->
+  createFilePath: (dir, fileName) ->
+    isWin = /^win/.test(process.platform)
+    if isWin
+      return dir + '\\' + fileName
+    else
+      return dir + '/' + fileName
+
+  getGulpfiles: (cwd, gulpfiles) ->
     dirs = []
+    if not gulpfiles
+      gulpfiles = []
 
     gfregx = /^gulpfile\.[js|coffee]/i
     for entry in fs.readdirSync(cwd) when entry.indexOf('.') isnt 0
       if gfregx.test(entry)
-        @gulpFile = entry
-        return cwd
+        gulpfiles.push({
+          dir: cwd,
+          fileName: entry
+        })
 
       else if entry.indexOf('node_modules') is -1
         abs = path.join(cwd, entry)
@@ -60,39 +113,37 @@ class GulpControlView extends View
           dirs.push abs
 
     for dir in dirs
-      if found = @getGulpCwd(dir)
-        return found
+      if foundGulpfiles = @getGulpfiles(dir)
+        gulpfiles = gulpfiles.concat(foundGulpfiles)
 
-    return
+    return gulpfiles
 
   getTaskId: (taskname) ->
     shasum = crypto.createHash('sha1')
     shasum.update(taskname)
     return "gulp-#{shasum.digest('hex')}"
 
+
   getGulpTasks: ->
-    @tasks = []
-
-    projpath = atom.project.getPaths()[0]
-    unless @gulpCwd = @getGulpCwd(projpath)
-      @writeOutput "Unable to find #{projpath}/**/gulpfile.[js|coffee]", 'error'
-      return
-
-    @writeOutput "Using #{@gulpCwd}/#{@gulpFile}"
+    @writeOutput "Using #{@gulpFilePath}"
     @writeOutput 'Retrieving list of gulp tasks'
+
+    @tasks = []
 
     onOutput = (output) =>
       for task in output.split('\n') when task.length
         @tasks.push task
+
 
     onError = (output) =>
       @gulpErr(output)
 
     onExit = (code) =>
       if code is 0
+        @taskList.empty()
         for task in @tasks.sort()
           tid = @getTaskId(task)
-          @taskList.append "<li id='#{tid}' class='task'>#{task}</li>"
+          @taskList.append "<li id='#{tid}' class='item'>#{task}</li>"
         @writeOutput "#{@tasks.length} tasks found"
 
       else
@@ -100,6 +151,7 @@ class GulpControlView extends View
         console.error 'GulpControl: getGulpTasks, exit', code
 
     @runGulp '--tasks-simple', onOutput, onError, onExit
+
     return
 
   runGulp: (task, stdout, stderr, exit) ->
@@ -112,16 +164,15 @@ class GulpControlView extends View
     projpath = atom.project.getPaths()[0]
     localGulpPath = path.join(projpath, 'node_modules', '.bin', 'gulp')
     if fs.existsSync(localGulpPath)
-        command = localGulpPath
+      command = localGulpPath
 
-    args = [task, '--color']
+    args = [task, '--color', '--gulpfile', @gulpFilePath]
 
     process.env.PATH = switch process.platform
       when 'win32' then process.env.PATH
       else "#{process.env.PATH}:/usr/local/bin"
 
     options =
-      cwd: @gulpCwd
       env: process.env
 
     stdout or= (output) => @gulpOut(output)
@@ -134,8 +185,8 @@ class GulpControlView extends View
 
     tid = @getTaskId(task)
 
-    @find('.tasks li.task.active').removeClass 'active'
-    @find(".tasks li.task##{tid}").addClass 'active running'
+    @find('.tasks li.item.active').removeClass 'active'
+    @find(".tasks li.item##{tid}").addClass 'active running'
 
     @process = new BufferedProcess({command, args, options, stdout, stderr, exit})
     return
